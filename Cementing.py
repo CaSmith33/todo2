@@ -181,6 +181,7 @@ if result:
     c.metric("Annulus incl. excess", f'{annular:,.2f} bbl')
     d.metric("Pump displacement", f'{result["pump_gal"]:,.3f} gal/stroke')
     st.subheader("Annular volumes by casing / hole section")
+    st.caption("Nominal capacity (bbl/ft) is calculated from the hole or previous casing ID and the new casing OD. It excludes all open-hole excess.")
     section_df = pd.DataFrame(segments).copy()
     section_df["Excess added (bbl)"] = section_df["Adjusted (bbl)"] - section_df["Nominal (bbl)"]
     section_df["Strokes (theoretical)"] = (
@@ -188,7 +189,7 @@ if result:
     )
     display_cols = [
         "Section", "Type", "Start MD (ft)", "End MD (ft)", "Length (ft)",
-        "Outer ID (in)", "Casing OD (in)", "Excess (%)",
+        "Outer ID (in)", "Casing OD (in)", "Nominal capacity (bbl/ft)", "Excess (%)",
         "Nominal (bbl)", "Excess added (bbl)", "Adjusted (bbl)",
         "Strokes (theoretical)",
     ]
@@ -196,7 +197,8 @@ if result:
         section_df[display_cols].style.format({
             "Start MD (ft)": "{:,.2f}", "End MD (ft)": "{:,.2f}",
             "Length (ft)": "{:,.2f}", "Outer ID (in)": "{:.3f}",
-            "Casing OD (in)": "{:.3f}", "Excess (%)": "{:.1f}",
+            "Casing OD (in)": "{:.3f}", "Nominal capacity (bbl/ft)": "{:.5f}",
+            "Excess (%)": "{:.1f}",
             "Nominal (bbl)": "{:,.2f}", "Excess added (bbl)": "{:,.2f}",
             "Adjusted (bbl)": "{:,.2f}", "Strokes (theoretical)": "{:,.1f}",
         }),
@@ -212,11 +214,17 @@ if result:
         )[["Length (ft)", "Nominal (bbl)", "Excess added (bbl)",
            "Adjusted (bbl)", "Strokes (theoretical)"]].sum()
     )
+    # For grouped intervals, compute nominal capacity from total nominal
+    # volume / total footage (weighted if the grouped inputs ever vary).
+    by_casing["Nominal capacity (bbl/ft)"] = (
+        by_casing["Nominal (bbl)"] / by_casing["Length (ft)"]
+    )
     st.markdown("**Subtotal by previous casing / open-hole section**")
     st.dataframe(
         by_casing.style.format({
             "Outer ID (in)": "{:.3f}", "Casing OD (in)": "{:.3f}",
-            "Length (ft)": "{:,.2f}", "Nominal (bbl)": "{:,.2f}",
+            "Length (ft)": "{:,.2f}", "Nominal capacity (bbl/ft)": "{:.5f}",
+            "Nominal (bbl)": "{:,.2f}",
             "Excess added (bbl)": "{:,.2f}", "Adjusted (bbl)": "{:,.2f}",
             "Strokes (theoretical)": "{:,.1f}",
         }), hide_index=True, use_container_width=True,
