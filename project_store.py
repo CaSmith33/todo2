@@ -32,6 +32,13 @@ def initialize():
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(company_id, name)
             );
+            CREATE TABLE IF NOT EXISTS cement_scenarios (
+                well_id INTEGER NOT NULL REFERENCES wells(id),
+                tally_id INTEGER NOT NULL REFERENCES casing_tallies(id),
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(well_id, tally_id)
+            );
             CREATE TABLE IF NOT EXISTS casing_tallies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 well_id INTEGER NOT NULL REFERENCES wells(id),
@@ -89,9 +96,15 @@ def export_json():
         )]
     for item in tallies:
         item["rows"] = json.loads(item.pop("payload_json"))
+    with connect() as con:
+        cement = [dict(row) for row in con.execute(
+            "SELECT well_id, tally_id, payload_json, updated_at FROM cement_scenarios"
+        )]
+    for item in cement:
+        item["payload"] = json.loads(item.pop("payload_json"))
     return json.dumps({
-        "schema_version": 2, "companies": companies(), "wells": wells(),
-        "casing_tallies": tallies,
+        "schema_version": 3, "companies": companies(), "wells": wells(),
+        "casing_tallies": tallies, "cement_scenarios": cement,
     }, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
 
 def save_casing_tally(well_id, name, section, rows):
@@ -122,3 +135,24 @@ def load_casing_tally(tally_id, well_id):
             (int(tally_id), int(well_id)),
         ).fetchone()
     return ({**dict(row), "rows": json.loads(row["payload_json"])} if row else None)
+
+def save_cement_scenario(well_id, tally_id, payload):
+    """Save or replace the most recent cementing worksheet for this well/tally."""
+    # Confirm that the selected tally belongs to the selected well.
+    if load_casing_tally(tally_id, well_id) is None:
+        raise ValueError("Tally does not belong to the selected well.")
+    with connect() as con:
+        con.execute("""
+            INSERT INTO cement_scenarios(well_id, tally_id, payload_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(well_id, tally_id) DO UPDATE
+            SET payload_json=excluded.payload_json, updated_at=CURRENT_TIMESTAMP
+        """, (int(well_id), int(tally_id), json.dumps(payload, allow_nan=False)))
+
+def load_cement_scenario(well_id, tally_id):
+    with connect() as con:
+        row = con.execute(
+            "SELECT payload_json FROM cement_scenarios WHERE well_id=? AND tally_id=?",
+            (int(well_id), int(tally_id))
+        ).fetchone()
+    return json.loads(row["payload_json"]) if row else None
