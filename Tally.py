@@ -66,12 +66,15 @@ options.update({
     "suppressRowClickSelection": True,
     "domLayout": "normal",
 })
-# Grid's displayed order is returned after drag; use that exact order for calculations.
+# Return the actual visible row order to Python before the user presses Run Tally.
 grid = AgGrid(
     st.session_state.tally_rows_v2,
     gridOptions=options,
-    update_mode=GridUpdateMode.MODEL_CHANGED | GridUpdateMode.VALUE_CHANGED,
-    data_return_mode=DataReturnMode.AS_INPUT,
+    # Dragging a row does not emit a cell-value-change event. Return the
+    # newly displayed order on rowDragEnd, and checkbox edits on value change.
+    update_mode=GridUpdateMode.NO_UPDATE,
+    update_on=["rowDragEnd", "cellValueChanged"],
+    data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
     allow_unsafe_jscode=False,
     fit_columns_on_grid_load=False,
     height=400,
