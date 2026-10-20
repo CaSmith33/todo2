@@ -220,6 +220,26 @@ if result is not None:
 
 if result is not None:
     st.divider()
+
+    active_well_id = st.session_state.get("active_well_id")
+    if active_well_id is not None:
+        st.subheader("Save tally to well project")
+        with st.form("save_tally_snapshot"):
+            tally_name = st.text_input("Tally name", value="Casing tally")
+            section_name = st.text_input("Casing section")
+            save_clicked = st.form_submit_button("Save tally snapshot")
+        if save_clicked:
+            try:
+                import json
+                from project_store import save_casing_tally
+                snapshot = json.loads(result.to_json(orient="records"))
+                tally_id = save_casing_tally(active_well_id, tally_name, section_name, snapshot)
+                st.success(f"Saved tally #{tally_id} to the selected well for Cementing.")
+            except Exception as exc:
+                st.error(f"Unable to save tally: {exc}")
+    else:
+        st.info("Select an active well in the sidebar to save this tally for Cementing.")
+
     st.subheader("Print-ready tally report")
     st.caption("Enter report details, then download the landscape PDF. Headers repeat on every page.")
     col1, col2, col3 = st.columns(3)
