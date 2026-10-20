@@ -37,6 +37,7 @@ navigation = st.navigation({
     "Engineering Tools": [
         st.Page("Tally.py", title="Casing Tally", icon="📏"),
         st.Page("FIT.py", title="FIT Analysis", icon="📈"),
+        st.Page("Cementing.py", title="Cementing Volumes", icon="🧪"),
     ],
 })
 navigation.run()
