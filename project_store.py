@@ -83,8 +83,16 @@ def update_well(well_id, api_uwi, location, status, notes):
         """, (api_uwi.strip(), location.strip(), status, notes.strip(), int(well_id)))
 
 def export_json():
-    return json.dumps({"schema_version": 1, "companies": companies(), "wells": wells()},
-                      ensure_ascii=False, indent=2).encode("utf-8")
+    with connect() as con:
+        tallies = [dict(row) for row in con.execute(
+            "SELECT id, well_id, name, section, created_at, payload_json FROM casing_tallies ORDER BY id"
+        )]
+    for item in tallies:
+        item["rows"] = json.loads(item.pop("payload_json"))
+    return json.dumps({
+        "schema_version": 2, "companies": companies(), "wells": wells(),
+        "casing_tallies": tallies,
+    }, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
 
 def save_casing_tally(well_id, name, section, rows):
     """Store a snapshot of ordered joints including Used state and diameters."""
