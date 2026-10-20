@@ -52,13 +52,35 @@ def triplex_gal_per_stroke(liner_in, stroke_in, efficiency):
 def segment_volumes(segments):
     result = []
     for section in segments:
-        length = float(section["Length (ft)"])
+        start = float(section["Start MD (ft)"])
+        end = float(section["End MD (ft)"])
+        if not all(isfinite(v) for v in (start, end)) or start < 0 or end <= start:
+            raise ValueError("Section End MD must exceed Start MD and both must be nonnegative.")
+        length = end - start
         bore = float(section["Outer ID (in)"])
         casing = float(section["Casing OD (in)"])
         excess = float(section["Excess (%)"]) if section["Type"] == "Open hole" else 0.0
         if excess < 0:
             raise ValueError("Excess percent must not be negative.")
         nominal = annular_bbl(length, bore, casing)
-        result.append({**section, "Nominal (bbl)": nominal,
+        result.append({**section, "Length (ft)": length, "Nominal (bbl)": nominal,
                        "Adjusted (bbl)": nominal * (1 + excess / 100)})
     return result
+
+def check_intervals(segments, casing_top_md, shoe_md):
+    """Reject overlapping/nonphysical annular intervals; return any missing ranges."""
+    ordered = sorted(segments, key=lambda s: float(s["Start MD (ft)"]))
+    gaps = []
+    cursor = casing_top_md
+    for seg in ordered:
+        a, b = float(seg["Start MD (ft)"]), float(seg["End MD (ft)"])
+        if a < casing_top_md - 0.001 or b > shoe_md + 0.001:
+            raise ValueError("Each annular interval must lie between casing top MD and shoe MD.")
+        if a < cursor - 0.001:
+            raise ValueError("Annular sections overlap; use distinct intervals.")
+        if a > cursor + 0.001:
+            gaps.append((cursor, a))
+        cursor = b
+    if cursor < shoe_md - 0.001:
+        gaps.append((cursor, shoe_md))
+    return gaps
