@@ -1,6 +1,14 @@
 """Interactive casing tally: Excel import, drag reorder, include/exclude and forward/reverse lengths."""
 import io
 import pandas as pd
+from datetime import date
+from xml.sax.saxutils import escape
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_LEFT
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.pdfbase.pdfmetrics import stringWidth
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
@@ -33,6 +41,115 @@ def calculate(df):
     result["Forward (ft)"] = effective.cumsum().round(3)
     result["Backward (ft)"] = effective.iloc[::-1].cumsum().iloc[::-1].round(3)
     return result
+
+
+def create_print_pdf(result, details):
+    """Build a landscape, multi-page, print-ready PDF; repeat table headings."""
+    buffer = io.BytesIO()
+    page_w, page_h = landscape(letter)
+    margin = 28
+    doc = SimpleDocTemplate(
+        buffer, pagesize=(page_w, page_h),
+        leftMargin=margin, rightMargin=margin,
+        topMargin=98, bottomMargin=43,
+        title="Casing Tally - " + str(details["Well"]),
+        author=str(details["Prepared By"]),
+    )
+    font = ParagraphStyle(
+        "Cell", fontName="Helvetica", fontSize=7.1, leading=9,
+        alignment=TA_LEFT, wordWrap="CJK",
+    )
+    bold = ParagraphStyle(
+        "Head", parent=font, fontName="Helvetica-Bold", fontSize=7,
+        textColor=colors.white,
+    )
+    columns = [
+        ("Run", "Run Order", 31), ("Used", "Used", 31),
+        ("No.", "Number", 43), ("Length", "Length", 49),
+        ("Grade", "grade", 40), ("Wt", "weight", 32),
+        ("ID", "ID", 38), ("OD", "OD", 38),
+        ("Description", "Description", 104),
+        ("Description 2", "Description 2", 94),
+        ("Forward", "Forward (ft)", 57),
+        ("Backward", "Backward (ft)", 57),
+    ]
+    usable = page_w - 2 * margin
+    widths = [c[2] for c in columns]
+    widths[8] += (usable - sum(widths)) * 0.55
+    widths[9] += (usable - sum(widths)) * 0.45
+
+    def cell(v):
+        if pd.isna(v):
+            return ""
+        if isinstance(v, float):
+            return f"{v:,.3f}".rstrip("0").rstrip(".")
+        return str(v)
+
+    rows = [[Paragraph(escape(head), bold) for head, _, _ in columns]]
+    inactive = []
+    for i, (_, record) in enumerate(result.iterrows(), start=1):
+        rows.append([
+            Paragraph(escape("Yes" if record["Used"] else "No") if key == "Used" else escape(cell(record[key])), font)
+            for _, key, _ in columns
+        ])
+        if not bool(record["Used"]):
+            inactive.append(i)
+
+    table = Table(rows, colWidths=widths, repeatRows=1, hAlign="LEFT")
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#18324E")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.HexColor("#10243B")),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.25, colors.HexColor("#DCE4EA")),
+    ]
+    for i in range(2, len(rows), 2):
+        style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#F3F7FA")))
+    for i in inactive:
+        style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#ECECEC")))
+        style.append(("TEXTCOLOR", (0, i), (-1, i), colors.HexColor("#777777")))
+    table.setStyle(TableStyle(style))
+    total_length = result.loc[result["Used"], "Length"].sum()
+    summary = (
+        f'Included joints: {int(result["Used"].sum())}  |  '
+        f'Excluded joints: {int((~result["Used"]).sum())}  |  '
+        f'Total included length: {total_length:,.2f} ft'
+    )
+
+    def draw_page(canvas, document):
+        canvas.saveState()
+        canvas.setFillColor(colors.HexColor("#18324E"))
+        canvas.rect(0, page_h - 9, page_w, 9, stroke=0, fill=1)
+        canvas.setFont("Helvetica-Bold", 14)
+        canvas.setFillColor(colors.HexColor("#18324E"))
+        canvas.drawString(margin, page_h - 31, "CASING TALLY")
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#46586D"))
+        # Keep long user-entered values within their allotted header slots.
+        def fitted(value, limit):
+            s = str(value or "-")
+            while s and stringWidth(s, "Helvetica", 8) > limit:
+                s = s[:-1]
+            return s
+        canvas.drawString(margin, page_h - 47, "Company: " + fitted(details["Company"], 195))
+        canvas.drawString(270, page_h - 47, "Well: " + fitted(details["Well"], 190))
+        canvas.drawString(530, page_h - 47, "Section: " + fitted(details["Section"], 180))
+        canvas.drawString(margin, page_h - 62, "Date: " + fitted(details["Date"], 130))
+        canvas.drawString(195, page_h - 62, "Version: " + fitted(details["Version"], 95))
+        canvas.drawString(350, page_h - 62, "Prepared by: " + fitted(details["Prepared By"], 260))
+        canvas.setStrokeColor(colors.HexColor("#BCCAD5"))
+        canvas.line(margin, page_h - 72, page_w - margin, page_h - 72)
+        canvas.setFont("Helvetica", 7.5)
+        canvas.drawString(margin, 25, summary)
+        canvas.drawRightString(page_w - margin, 25, f"Page {document.page}")
+        canvas.restoreState()
+
+    doc.build([table], onFirstPage=draw_page, onLaterPages=draw_page)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 if "tally_rows_v2" not in st.session_state:
     st.session_state.tally_rows_v2 = prepare(pd.DataFrame([
@@ -100,3 +217,29 @@ if result is not None:
     st.dataframe(result, hide_index=True, use_container_width=True)
     st.download_button("Download tally CSV", result.to_csv(index=False).encode("utf-8"),
                        file_name="casing_tally.csv", mime="text/csv")
+
+if result is not None:
+    st.divider()
+    st.subheader("Print-ready tally report")
+    st.caption("Enter report details, then download the landscape PDF. Headers repeat on every page.")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        company = st.text_input("Company Name", key="tally_company")
+        well = st.text_input("Well", key="tally_well")
+    with col2:
+        section = st.text_input("Section", key="tally_section")
+        report_date = st.date_input("Date", value=date.today(), key="tally_report_date")
+    with col3:
+        version = st.text_input("Version", value="1.0", key="tally_version")
+        prepared_by = st.text_input("Prepared By", key="tally_prepared_by")
+    details = {
+        "Company": company, "Well": well, "Section": section,
+        "Date": report_date.strftime("%Y-%m-%d"),
+        "Version": version, "Prepared By": prepared_by,
+    }
+    pdf = create_print_pdf(result, details)
+    st.download_button(
+        "Download Print-Ready PDF", data=pdf,
+        file_name="casing_tally_print.pdf",
+        mime="application/pdf", type="primary",
+    )
