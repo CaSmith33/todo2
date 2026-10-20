@@ -10,7 +10,7 @@ all_wells = wells()
 a,b,c = st.columns(3)
 a.metric("Companies", len(all_companies))
 b.metric("Well Projects", len(all_wells))
-c.metric("Available Tools", 2)
+c.metric("Available Tools", 3)
 
 st.subheader("Engineering tools")
 one,two = st.columns(2)
@@ -26,6 +26,12 @@ with two:
         st.write("Analyze pressure tests with your existing FIT application.")
         if st.button("Open FIT Analysis", use_container_width=True):
             st.switch_page("FIT.py")
+
+with st.container(border=True):
+    st.markdown("#### 🧪 Cementing Volumes")
+    st.write("Load a saved Casing Tally, calculate shoe track and annular capacities, open-hole excess and pump strokes.")
+    if st.button("Open Cementing Volumes", use_container_width=True):
+        st.switch_page("Cementing.py")
 
 st.subheader("Well projects")
 if not all_wells:
