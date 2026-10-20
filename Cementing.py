@@ -180,55 +180,72 @@ if result:
     b.metric("Inside casing above shoe", f'{inside["above_bbl"]:,.2f} bbl')
     c.metric("Annulus incl. excess", f'{annular:,.2f} bbl')
     d.metric("Pump displacement", f'{result["pump_gal"]:,.3f} gal/stroke')
-    st.subheader("Annular volumes by casing / hole section")
-    st.caption("Nominal capacity (bbl/ft) is calculated from the hole or previous casing ID and the new casing OD. It excludes all open-hole excess.")
+    st.subheader("Annular volumes by Section / Description")
+    st.caption("Rows sharing the same Section / Description are added together. Nominal capacity excludes excess; total volumes include open-hole excess only.")
     section_df = pd.DataFrame(segments).copy()
-    section_df["Excess added (bbl)"] = section_df["Adjusted (bbl)"] - section_df["Nominal (bbl)"]
+    section_df["Excess added (bbl)"] = (
+        section_df["Adjusted (bbl)"] - section_df["Nominal (bbl)"]
+    )
     section_df["Strokes (theoretical)"] = (
         section_df["Adjusted (bbl)"] * 42 / result["pump_gal"]
     )
-    display_cols = [
-        "Section", "Type", "Start MD (ft)", "End MD (ft)", "Length (ft)",
-        "Outer ID (in)", "Casing OD (in)", "Nominal capacity (bbl/ft)", "Excess (%)",
+    # The entered section name is the reporting key. Preserve differing hole
+    # types in one group as "Mixed" rather than splitting the description.
+    by_section = (
+        section_df.groupby("Section", as_index=False, sort=False)
+        .agg({
+            "Type": lambda types: types.iloc[0] if types.nunique() == 1 else "Mixed",
+            "Length (ft)": "sum",
+            "Nominal (bbl)": "sum",
+            "Excess added (bbl)": "sum",
+            "Adjusted (bbl)": "sum",
+            "Strokes (theoretical)": "sum",
+        })
+    )
+    by_section["Nominal capacity (bbl/ft)"] = (
+        by_section["Nominal (bbl)"] / by_section["Length (ft)"]
+    )
+    by_section["Gallons"] = by_section["Adjusted (bbl)"] * 42
+    section_columns = [
+        "Section", "Type", "Length (ft)", "Nominal capacity (bbl/ft)",
         "Nominal (bbl)", "Excess added (bbl)", "Adjusted (bbl)",
-        "Strokes (theoretical)",
+        "Gallons", "Strokes (theoretical)",
     ]
+    section_formats = {
+        "Length (ft)": "{:,.2f}",
+        "Nominal capacity (bbl/ft)": "{:.5f}",
+        "Nominal (bbl)": "{:,.2f}",
+        "Excess added (bbl)": "{:,.2f}",
+        "Adjusted (bbl)": "{:,.2f}",
+        "Gallons": "{:,.1f}",
+        "Strokes (theoretical)": "{:,.1f}",
+    }
     st.dataframe(
-        section_df[display_cols].style.format({
-            "Start MD (ft)": "{:,.2f}", "End MD (ft)": "{:,.2f}",
-            "Length (ft)": "{:,.2f}", "Outer ID (in)": "{:.3f}",
-            "Casing OD (in)": "{:.3f}", "Nominal capacity (bbl/ft)": "{:.5f}",
-            "Excess (%)": "{:.1f}",
-            "Nominal (bbl)": "{:,.2f}", "Excess added (bbl)": "{:,.2f}",
-            "Adjusted (bbl)": "{:,.2f}", "Strokes (theoretical)": "{:,.1f}",
-        }),
+        by_section[section_columns].style.format(section_formats),
         hide_index=True, use_container_width=True,
     )
-
-    # Preserve previous casing identity: user-entered Section labels identify each
-    # previous casing string. Sum repeated intervals without combining unrelated IDs.
-    by_casing = (
-        section_df.groupby(
-            ["Type", "Section", "Outer ID (in)", "Casing OD (in)"],
-            as_index=False, sort=False,
-        )[["Length (ft)", "Nominal (bbl)", "Excess added (bbl)",
-           "Adjusted (bbl)", "Strokes (theoretical)"]].sum()
+    st.download_button(
+        "Download section volume breakdown CSV",
+        data=by_section[section_columns].to_csv(index=False).encode("utf-8"),
+        file_name="cementing_by_section.csv", mime="text/csv",
     )
-    # For grouped intervals, compute nominal capacity from total nominal
-    # volume / total footage (weighted if the grouped inputs ever vary).
-    by_casing["Nominal capacity (bbl/ft)"] = (
-        by_casing["Nominal (bbl)"] / by_casing["Length (ft)"]
-    )
-    st.markdown("**Subtotal by previous casing / open-hole section**")
-    st.dataframe(
-        by_casing.style.format({
-            "Outer ID (in)": "{:.3f}", "Casing OD (in)": "{:.3f}",
-            "Length (ft)": "{:,.2f}", "Nominal capacity (bbl/ft)": "{:.5f}",
-            "Nominal (bbl)": "{:,.2f}",
-            "Excess added (bbl)": "{:,.2f}", "Adjusted (bbl)": "{:,.2f}",
-            "Strokes (theoretical)": "{:,.1f}",
-        }), hide_index=True, use_container_width=True,
-    )
+    with st.expander("Show individual annular intervals and geometry"):
+        detail_columns = [
+            "Section", "Type", "Start MD (ft)", "End MD (ft)", "Length (ft)",
+            "Outer ID (in)", "Casing OD (in)", "Nominal capacity (bbl/ft)",
+            "Excess (%)", "Nominal (bbl)", "Excess added (bbl)",
+            "Adjusted (bbl)", "Strokes (theoretical)",
+        ]
+        st.dataframe(
+            section_df[detail_columns].style.format({
+                **section_formats,
+                "Start MD (ft)": "{:,.2f}",
+                "End MD (ft)": "{:,.2f}",
+                "Outer ID (in)": "{:.3f}",
+                "Casing OD (in)": "{:.3f}",
+                "Excess (%)": "{:.1f}",
+            }), hide_index=True, use_container_width=True,
+        )
     open_hole_bbl = float(
         section_df.loc[section_df["Type"] == "Open hole", "Adjusted (bbl)"].sum()
     )
@@ -326,8 +343,8 @@ if result:
     st.caption("The horizontal diameter scale is locked; scroll or drag to zoom depth. Use the plot toolbar's Reset axes button to restore the full well view.")
     st.plotly_chart(fig, use_container_width=True)
     csv_export = pd.concat([
-        section_df.assign(Report_Table="Detailed annular sections"),
-        by_casing.assign(Report_Table="Annulus subtotal by casing"),
+        by_section.assign(Report_Table="Volumes by Section / Description"),
+        section_df.assign(Report_Table="Individual annular intervals"),
     ], ignore_index=True, sort=False)
     st.download_button(
         "Download annular breakdown CSV",
