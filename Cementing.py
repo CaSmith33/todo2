@@ -180,11 +180,64 @@ if result:
     b.metric("Inside casing above shoe", f'{inside["above_bbl"]:,.2f} bbl')
     c.metric("Annulus incl. excess", f'{annular:,.2f} bbl')
     d.metric("Pump displacement", f'{result["pump_gal"]:,.3f} gal/stroke')
-    st.dataframe(pd.DataFrame(segments), hide_index=True, use_container_width=True)
+    st.subheader("Annular volumes by casing / hole section")
+    section_df = pd.DataFrame(segments).copy()
+    section_df["Excess added (bbl)"] = section_df["Adjusted (bbl)"] - section_df["Nominal (bbl)"]
+    section_df["Strokes (theoretical)"] = (
+        section_df["Adjusted (bbl)"] * 42 / result["pump_gal"]
+    )
+    display_cols = [
+        "Section", "Type", "Start MD (ft)", "End MD (ft)", "Length (ft)",
+        "Outer ID (in)", "Casing OD (in)", "Excess (%)",
+        "Nominal (bbl)", "Excess added (bbl)", "Adjusted (bbl)",
+        "Strokes (theoretical)",
+    ]
+    st.dataframe(
+        section_df[display_cols].style.format({
+            "Start MD (ft)": "{:,.2f}", "End MD (ft)": "{:,.2f}",
+            "Length (ft)": "{:,.2f}", "Outer ID (in)": "{:.3f}",
+            "Casing OD (in)": "{:.3f}", "Excess (%)": "{:.1f}",
+            "Nominal (bbl)": "{:,.2f}", "Excess added (bbl)": "{:,.2f}",
+            "Adjusted (bbl)": "{:,.2f}", "Strokes (theoretical)": "{:,.1f}",
+        }),
+        hide_index=True, use_container_width=True,
+    )
+
+    # Preserve previous casing identity: user-entered Section labels identify each
+    # previous casing string. Sum repeated intervals without combining unrelated IDs.
+    by_casing = (
+        section_df.groupby(
+            ["Type", "Section", "Outer ID (in)", "Casing OD (in)"],
+            as_index=False, sort=False,
+        )[["Length (ft)", "Nominal (bbl)", "Excess added (bbl)",
+           "Adjusted (bbl)", "Strokes (theoretical)"]].sum()
+    )
+    st.markdown("**Subtotal by previous casing / open-hole section**")
+    st.dataframe(
+        by_casing.style.format({
+            "Outer ID (in)": "{:.3f}", "Casing OD (in)": "{:.3f}",
+            "Length (ft)": "{:,.2f}", "Nominal (bbl)": "{:,.2f}",
+            "Excess added (bbl)": "{:,.2f}", "Adjusted (bbl)": "{:,.2f}",
+            "Strokes (theoretical)": "{:,.1f}",
+        }), hide_index=True, use_container_width=True,
+    )
+    open_hole_bbl = float(
+        section_df.loc[section_df["Type"] == "Open hole", "Adjusted (bbl)"].sum()
+    )
+    cased_hole_bbl = float(
+        section_df.loc[section_df["Type"] == "Cased hole", "Adjusted (bbl)"].sum()
+    )
+    oh_col, ch_col, total_col = st.columns(3)
+    oh_col.metric("Open-hole annulus (incl. excess)", f"{open_hole_bbl:,.2f} bbl")
+    ch_col.metric("Cased-hole annulus", f"{cased_hole_bbl:,.2f} bbl")
+    total_col.metric("Total annulus", f"{annular:,.2f} bbl")
+
     summary = pd.DataFrame([
         {"Volume": "Shoe track", "Barrels": inside["shoe_bbl"]},
         {"Volume": "Casing ID above shoe track", "Barrels": inside["above_bbl"]},
         {"Volume": "Total casing internal", "Barrels": inside["internal_bbl"]},
+        {"Volume": "Open-hole annulus, including excess", "Barrels": open_hole_bbl},
+        {"Volume": "Cased-hole annulus", "Barrels": cased_hole_bbl},
         {"Volume": "Total annulus, including OH excess", "Barrels": annular},
         {"Volume": "Sum of casing interior and annulus (not pumping schedule)",
          "Barrels": inside["internal_bbl"] + annular},
@@ -235,12 +288,44 @@ if result:
     fig.add_shape(type="line",x0=-new_od/2,x1=new_od/2,y0=bottom,y1=bottom,
                   line=dict(color="#12334F",width=4))
     fig.add_annotation(x=0,y=bottom,text="Shoe",showarrow=True,ay=28,font=dict(size=10))
-    fig.update_layout(height=580,margin=dict(t=12,b=28,l=58,r=185),
-        xaxis=dict(title="Illustrative diameter (in)",range=[-max_diam*.75,max_diam*1.0],
-                   zeroline=False,showgrid=False),
-        yaxis=dict(title="Measured depth (ft)",autorange="reversed",showgrid=True),
-        plot_bgcolor="white",paper_bgcolor="white",showlegend=False)
+    # Fix the horizontal bounds and prevent zoom interactions from distorting
+    # the diameter scale. Only depth is zoomable. Plotly range is specified
+    # descending to guarantee 0/shallow MD at the TOP.
+    diagram_top = min(
+        result["casing_top"], min(float(x["Start MD (ft)"]) for x in segments)
+    )
+    diagram_bottom = max(
+        result["shoe_md"], max(float(x["End MD (ft)"]) for x in segments)
+    )
+    depth_padding = max((diagram_bottom - diagram_top) * 0.03, 1.0)
+    fig.update_layout(
+        height=700, autosize=True,
+        margin=dict(t=18, b=22, l=72, r=190),
+        dragmode="zoom",
+        xaxis=dict(
+            title=None, range=[-max_diam * 0.95, max_diam * 1.45],
+            fixedrange=True, zeroline=False, showgrid=False,
+            showticklabels=False, ticks="", showline=False,
+        ),
+        yaxis=dict(
+            title="Measured depth (ft MD)",
+            range=[diagram_bottom + depth_padding, max(0, diagram_top - depth_padding)],
+            autorange=False, showgrid=True, tickformat=",.0f",
+        ),
+        plot_bgcolor="white", paper_bgcolor="white", showlegend=False,
+        uirevision=f"cement-schematic-{well_id}-{tally_id}",
+    )
+    st.caption("The horizontal diameter scale is locked; scroll or drag to zoom depth. Use the plot toolbar's Reset axes button to restore the full well view.")
     st.plotly_chart(fig, use_container_width=True)
+    csv_export = pd.concat([
+        section_df.assign(Report_Table="Detailed annular sections"),
+        by_casing.assign(Report_Table="Annulus subtotal by casing"),
+    ], ignore_index=True, sort=False)
+    st.download_button(
+        "Download annular breakdown CSV",
+        data=csv_export.to_csv(index=False).encode("utf-8"),
+        file_name="cementing_annular_breakdown.csv", mime="text/csv",
+    )
     st.download_button("Download calculations CSV",
         data=summary.to_csv(index=False).encode("utf-8"),
         file_name="cementing_volumes.csv", mime="text/csv")
