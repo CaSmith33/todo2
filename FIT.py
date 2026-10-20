@@ -8,6 +8,8 @@
 
 import io
 import json
+from datetime import date
+from xml.sax.saxutils import escape
 from typing import Optional, Tuple
 
 import numpy as np
@@ -100,6 +102,142 @@ def detect_leakoff_lastN(df: pd.DataFrame, pre_n: int = 30, d2_neg_quantile: flo
 
     # Fallback: most negative curvature point
     return start + int(np.argmin(w_d2))
+
+
+def make_fit_report(df, options, details, metrics):
+    """One-page landscape PDF showing the plotted data and engineering summary."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib.utils import ImageReader
+    from reportlab.lib import colors
+
+    # Independent static rendering of the same series shown by Plotly.
+    fig, ax = plt.subplots(figsize=(12.2, 6.1), dpi=135)
+    fig.patch.set_facecolor("white")
+    ax.plot(df["idx"], df["pressure_raw"], label="Pressure (raw)", linewidth=1.25, color="#17699A")
+    if options["smooth"]:
+        ax.plot(df["idx"], df["pressure"], label="Pressure (smoothed)",
+                linewidth=1.45, color="#E09029")
+    chosen = options["selected_index"]
+    if chosen is not None:
+        ax.scatter([df.loc[chosen, "idx"]], [df.loc[chosen, "pressure"]],
+                   s=58, zorder=5, label="Selected leak-off", color="#C64748")
+    if options["d1"] or options["d2"]:
+        ax2 = ax.twinx()
+        if options["d1"]:
+            ax2.plot(df["idx"], df["dP_di"], label="dP/di",
+                     linewidth=1, alpha=0.65, color="#31A17D")
+        if options["d2"]:
+            ax2.plot(df["idx"], df["d2P_di2"], label="d²P/di²",
+                     linewidth=1, alpha=0.65, color="#8A5CC9")
+        ax2.set_ylabel("Derivatives", fontsize=9)
+        lines, labels = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines + lines2, labels + labels2,
+                  loc="upper center", bbox_to_anchor=(0.5, 1.13),
+                  ncol=3, fontsize=8, frameon=False)
+    else:
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.13),
+                  ncol=3, fontsize=8, frameon=False)
+    ax.set_xlabel("Index (i)", fontsize=10)
+    ax.set_ylabel("Pressure (psi)", fontsize=10)
+    ax.grid(True, alpha=0.18)
+    ax.tick_params(labelsize=8)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    image = io.BytesIO()
+    fig.savefig(image, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    image.seek(0)
+
+    buffer = io.BytesIO()
+    page_w, page_h = landscape(letter)
+    pdf = canvas.Canvas(buffer, pagesize=(page_w, page_h))
+    pdf.setTitle("Pressure Test Report - " + details["Well"])
+    pdf.setAuthor(details["Prepared By"])
+    navy = colors.HexColor("#18324E")
+    pdf.setFillColor(navy)
+    pdf.rect(0, page_h - 9, page_w, 9, stroke=0, fill=1)
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(30, page_h - 34, "PRESSURE TEST REPORT")
+
+    def field(label, value, x, y, max_width):
+        pdf.setFont("Helvetica-Bold", 8)
+        pdf.setFillColor(navy)
+        pdf.drawString(x, y, label + ":")
+        label_width = pdf.stringWidth(label + ": ", "Helvetica-Bold", 8)
+        pdf.setFont("Helvetica", 8)
+        pdf.setFillColor(colors.HexColor("#42546A"))
+        text = str(value or "—")
+        allowed = max_width - label_width
+        while text and pdf.stringWidth(text, "Helvetica", 8) > allowed:
+            text = text[:-1]
+        pdf.drawString(x + label_width, y, text)
+
+    field("Company", details["Company"], 30, page_h - 55, 230)
+    field("Well", details["Well"], 288, page_h - 55, 230)
+    field("Section", details["Section"], 555, page_h - 55, 220)
+    field("Date", details["Date"], 30, page_h - 71, 160)
+    field("Version", details["Version"], 220, page_h - 71, 130)
+    field("Prepared by", details["Prepared By"], 390, page_h - 71, 350)
+    pdf.setStrokeColor(colors.HexColor("#C6D4DF"))
+    pdf.line(30, page_h - 80, page_w - 30, page_h - 80)
+
+    # Chart occupies the main report area while retaining its aspect ratio.
+    img = ImageReader(image)
+    iw, ih = img.getSize()
+    box_w, box_h = page_w - 60, 390
+    ratio = min(box_w / iw, box_h / ih)
+    w, h = iw * ratio, ih * ratio
+    pdf.drawImage(img, (page_w - w) / 2, 125 + (box_h - h) / 2,
+                  width=w, height=h, preserveAspectRatio=True, mask="auto")
+
+    pdf.setFillColor(colors.HexColor("#F1F5F8"))
+    pdf.roundRect(30, 57, page_w - 60, 64, 7, stroke=0, fill=1)
+    summary_fields = [
+        ("Rows", str(metrics["rows"])),
+        ("Max pressure", f'{metrics["max_pressure_psi"]:,.1f} psi'),
+        ("Selected pressure", "—" if metrics["pressure_psi"] is None
+         else f'{metrics["pressure_psi"]:,.1f} psi'),
+        ("Gradient", "—" if metrics["gradient"] is None
+         else f'{metrics["gradient"]:.4f} psi/ft'),
+        ("EMW", "—" if metrics["emw"] is None
+         else f'{metrics["emw"]:.2f} ppg'),
+    ]
+    slot = (page_w - 64) / len(summary_fields)
+    for i, (label, value) in enumerate(summary_fields):
+        x = 38 + i * slot
+        pdf.setFont("Helvetica", 8)
+        pdf.setFillColor(colors.HexColor("#617487"))
+        pdf.drawString(x, 98, label)
+        pdf.setFont("Helvetica-Bold", 10)
+        pdf.setFillColor(navy)
+        pdf.drawString(x, 79, value)
+    pdf.setFont("Helvetica", 7.5)
+    pdf.setFillColor(colors.HexColor("#637284"))
+    pdf.drawString(30, 37,
+        f'TVD: {metrics["tvd_ft"]:,.1f} ft  |  Mud weight: {metrics["mud_weight_ppg"]:.2f} ppg  |  '
+        f'Leak-off index: {metrics["index"] if metrics["index"] is not None else "N/A"}')
+    pdf.drawRightString(page_w - 30, 24, "Page 1 of 1")
+    pdf.showPage()
+    pdf.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def project_report_defaults():
+    """Prefill values from the selected well without changing the analysis."""
+    active_id = st.session_state.get("active_well_id")
+    if active_id is None:
+        return "", ""
+    try:
+        from project_store import wells
+        well = next((w for w in wells() if w["id"] == active_id), None)
+        return (well["company_name"], well["name"]) if well else ("", "")
+    except Exception:
+        return "", ""
 
 # -----------------------------
 # Streamlit UI
@@ -259,6 +397,59 @@ if raw_df is not None and not raw_df.empty:
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
         st.plotly_chart(fig, use_container_width=True)
+
+
+        # Static print report uses the same processed data and selected analysis point.
+        st.subheader("Print-ready pressure test report")
+        st.caption("Generate a landscape PDF containing the plotted pressure curves, selected leak-off point, and key results.")
+        project_company, project_well = project_report_defaults()
+        project_key = st.session_state.get("active_well_id")
+        if st.session_state.get("_fit_report_project") != project_key:
+            st.session_state["_fit_report_project"] = project_key
+            st.session_state["fit_report_company"] = project_company
+            st.session_state["fit_report_well"] = project_well
+        report_a, report_b, report_c = st.columns(3)
+        with report_a:
+            company = st.text_input("Company Name", key="fit_report_company")
+            well = st.text_input("Well Name", key="fit_report_well")
+        with report_b:
+            section = st.text_input("Section", key="fit_report_section")
+            report_date = st.date_input("Report Date", value=date.today(), key="fit_report_date")
+        with report_c:
+            version = st.text_input("Version", value="1.0", key="fit_report_version")
+            prepared_by = st.text_input("Prepared By", key="fit_report_prepared_by")
+        if st.button("Prepare PDF report", key="fit_create_pdf"):
+            try:
+                report_details = {
+                    "Company": company, "Well": well, "Section": section,
+                    "Date": report_date.strftime("%Y-%m-%d"),
+                    "Version": version, "Prepared By": prepared_by,
+                }
+                report_metrics = {
+                    "rows": int(len(df)),
+                    "max_pressure_psi": float(df["pressure_raw"].max()),
+                    "pressure_psi": lop_pressure,
+                    "gradient": gradient,
+                    "emw": emw_ppg,
+                    "tvd_ft": float(tvd_ft),
+                    "mud_weight_ppg": float(mud_weight_ppg),
+                    "index": lop_index,
+                }
+                st.session_state["fit_report_pdf"] = make_fit_report(
+                    df,
+                    {"smooth": sg_enabled, "d1": show_d1, "d2": show_d2, "selected_index": idx_pick},
+                    report_details, report_metrics,
+                )
+            except Exception as exc:
+                st.error(f"Failed to generate PDF: {exc}")
+        if st.session_state.get("fit_report_pdf"):
+            st.download_button(
+                "Download Print-Ready PDF",
+                data=st.session_state["fit_report_pdf"],
+                file_name="FIT_pressure_test_report.pdf",
+                mime="application/pdf",
+                key="fit_download_pdf",
+            )
 
         # Data table — include Time for context (display only)
         st.subheader("Processed Data")
