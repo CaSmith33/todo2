@@ -32,6 +32,14 @@ def initialize():
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(company_id, name)
             );
+            CREATE TABLE IF NOT EXISTS casing_tallies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                well_id INTEGER NOT NULL REFERENCES wells(id),
+                name TEXT NOT NULL,
+                section TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                payload_json TEXT NOT NULL
+            );
         """)
 
 def companies():
@@ -77,3 +85,32 @@ def update_well(well_id, api_uwi, location, status, notes):
 def export_json():
     return json.dumps({"schema_version": 1, "companies": companies(), "wells": wells()},
                       ensure_ascii=False, indent=2).encode("utf-8")
+
+def save_casing_tally(well_id, name, section, rows):
+    """Store a snapshot of ordered joints including Used state and diameters."""
+    if not name.strip():
+        raise ValueError("Tally name is required.")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("Tally needs at least one joint.")
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO casing_tallies(well_id, name, section, payload_json) VALUES (?,?,?,?)",
+            (int(well_id), name.strip(), section.strip(), json.dumps(rows, allow_nan=False)),
+        )
+        return cur.lastrowid
+
+def list_casing_tallies(well_id):
+    with connect() as con:
+        return [dict(row) for row in con.execute(
+            """SELECT id, well_id, name, section, created_at
+               FROM casing_tallies WHERE well_id=? ORDER BY id DESC""", (int(well_id),)
+        )]
+
+def load_casing_tally(tally_id, well_id):
+    """Require a matching well id when reading a tally."""
+    with connect() as con:
+        row = con.execute(
+            "SELECT * FROM casing_tallies WHERE id=? AND well_id=?",
+            (int(tally_id), int(well_id)),
+        ).fetchone()
+    return ({**dict(row), "rows": json.loads(row["payload_json"])} if row else None)
