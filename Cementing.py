@@ -1,148 +1,247 @@
-"""Cementing preliminary volumetrics based on a saved Casing Tally."""
+"""Cementing worksheet: saved tallies, depth-based annular capacities, pump strokes and schematic."""
 import math
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
-from cement_calcs import (split_casing_capacity, segment_volumes,
-                          triplex_gal_per_stroke)
-from project_store import wells, list_casing_tallies, load_casing_tally
+
+from cement_calcs import (
+    split_casing_capacity, segment_volumes, check_intervals, triplex_gal_per_stroke
+)
+from project_store import (
+    wells, list_casing_tallies, load_casing_tally,
+    save_cement_scenario, load_cement_scenario,
+)
 
 st.set_page_config(page_title="Cementing Volumes", layout="wide")
 st.title("Cementing Volumes")
-st.caption("Load a saved casing tally, enter annular sections and open-hole excess, then calculate capacities and pump strokes.")
+st.caption("A preliminary, depth-based casing and annular capacity worksheet linked to your saved Casing Tally.")
 
 well_id = st.session_state.get("active_well_id")
 if well_id is None:
-    st.warning("Select a well project in the toolbox sidebar, then save a Casing Tally under that well.")
+    st.warning("Select a well in the toolbox sidebar first.")
     st.stop()
-well = next((w for w in wells() if w["id"] == well_id), None)
+well = next((x for x in wells() if x["id"] == well_id), None)
 if well is None:
-    st.error("The selected project no longer exists.")
+    st.error("The selected well cannot be found.")
     st.stop()
-st.info(f'Project: **{well["company_name"]}** / **{well["name"]}**')
-
-saved = list_casing_tallies(well_id)
-if not saved:
-    st.warning("No saved casing tallies for this well. Open Casing Tally, run the calculation, then select Save tally snapshot.")
+st.info(f'**{well["company_name"]}** / **{well["name"]}**')
+tallies = list_casing_tallies(well_id)
+if not tallies:
+    st.warning("No saved tally for this well. Run Casing Tally, then save the tally snapshot.")
     st.stop()
-lookup = {t["id"]: t for t in saved}
-selected_tally_id = st.selectbox("Saved casing tally", list(lookup),
-    format_func=lambda i: f'{lookup[i]["name"]} · {lookup[i]["section"] or "Unspecified section"} · {lookup[i]["created_at"]} (#{i})')
-tally = load_casing_tally(selected_tally_id, well_id)
-if tally is None:
-    st.error("Could not load the selected tally.")
-    st.stop()
+lookup = {x["id"]: x for x in tallies}
+tally_id = st.selectbox(
+    "Saved Casing Tally", list(lookup),
+    format_func=lambda n: f'{lookup[n]["name"]} · {lookup[n]["section"] or "No section"} · {lookup[n]["created_at"]} (#{n})',
+)
+tally = load_casing_tally(tally_id, well_id)
 included = [r for r in tally["rows"] if bool(r.get("Used", False))]
 if not included:
-    st.error("The saved tally has no included joints.")
+    st.error("The selected tally contains no included joints.")
     st.stop()
-
 try:
-    string_length = sum(float(r["Length"]) for r in included)
-    casing_ods = sorted({round(float(r["OD"]), 4) for r in included})
-    if any(float(r["ID"]) <= 0 or float(r["OD"]) <= 0 for r in included):
-        raise ValueError("All included joints need valid positive ID and OD.")
-except (ValueError, TypeError, KeyError) as err:
-    st.error(f"Invalid saved joint dimensions: {err}")
+    casing_length = sum(float(r["Length"]) for r in included)
+    unique_od = sorted({round(float(r["OD"]), 4) for r in included})
+    if casing_length <= 0 or any(float(r["ID"]) <= 0 or float(r["OD"]) <= 0 for r in included):
+        raise ValueError("Each included joint needs valid length, ID, and OD.")
+except (TypeError, ValueError, KeyError) as error:
+    st.error(f"Cannot use this saved tally: {error}")
     st.stop()
-st.write(f"**Included joints:** {len(included)}  ·  **String length:** {string_length:,.2f} ft")
-if len(casing_ods) > 1:
-    st.warning("The tally contains multiple casing ODs. Set the correct casing OD for each annular section below.")
+st.caption(f'Included joints: {len(included)}  |  Casing length: {casing_length:,.2f} ft')
+if len(unique_od) > 1:
+    st.warning("Multiple OD values exist in the tally. The simplified schematic uses an illustrative OD; set the correct OD within each annular interval.")
 
-st.subheader("1. Shoe track & internal casing volumes")
-left, right = st.columns(2)
-with left:
-    bottom_last = st.radio("Saved tally orientation", ["Shoe / bottom is last row", "Shoe / bottom is first row"],
-                           horizontal=False, help="Choose which end of the saved running order is at the casing shoe.")
-    shoe_length = st.number_input("Shoe track length (ft)", min_value=0.0,
-                                  max_value=float(string_length), value=min(80.0, float(string_length)),
-                                  step=5.0)
-with right:
-    st.caption("Shoe track is measured UP from the casing shoe. Capacities use the ID of each included joint, and the final joint is split if necessary.")
-    st.caption("Exclude joints in Casing Tally before saving. Accessories, float equipment and plug volumes are not independently modeled.")
-
-st.subheader("2. Annular sections & open-hole excess")
-st.caption("Enter each non-overlapping section along the cemented interval. Outer ID is hole diameter in open hole or the containing casing's drift/ID in cased hole. Only open-hole sections receive excess.")
-segment_key = f"cement_segments_{well_id}_{selected_tally_id}"
-default_od = float(casing_ods[0])
-if segment_key not in st.session_state:
-    st.session_state[segment_key] = pd.DataFrame([{
-        "Section": "Open hole", "Type": "Open hole",
-        "Length (ft)": float(string_length), "Outer ID (in)": 0.0,
-        "Casing OD (in)": default_od, "Excess (%)": 0.0,
-    }])
-segments_input = st.data_editor(
-    st.session_state[segment_key], num_rows="dynamic", hide_index=True,
-    use_container_width=True, key=f"cement_grid_{well_id}_{selected_tally_id}",
-    column_config={
-        "Type": st.column_config.SelectboxColumn("Type", options=["Open hole", "Cased hole"], required=True),
-        "Length (ft)": st.column_config.NumberColumn("Length (ft)", min_value=0.0, format="%.2f"),
-        "Outer ID (in)": st.column_config.NumberColumn("Hole / host casing ID (in)", min_value=0.0, format="%.3f"),
-        "Casing OD (in)": st.column_config.NumberColumn("String OD (in)", min_value=0.0, format="%.3f"),
-        "Excess (%)": st.column_config.NumberColumn("OH excess (%)", min_value=0.0, format="%.1f"),
+scenario_key = f"cement_worksheet_{well_id}_{tally_id}"
+if scenario_key not in st.session_state:
+    saved = load_cement_scenario(well_id, tally_id)
+    st.session_state[scenario_key] = saved or {
+        "shoe_md": float(round(casing_length, 2)),
+        "shoe_length": min(80.0, casing_length),
+        "bottom_last": True,
+        "method": "Manual gal/stroke",
+        "gal_stroke": 0.0, "liner": 6.0, "stroke": 12.0,
+        "efficiency": 95.0,
+        "segments": [{
+            "Section": "Open hole", "Type": "Open hole",
+            "Start MD (ft)": 0.0, "End MD (ft)": float(round(casing_length, 2)),
+            "Outer ID (in)": 0.0, "Casing OD (in)": float(unique_od[0]),
+            "Excess (%)": 0.0,
+        }],
     }
-)
-st.session_state[segment_key] = segments_input.copy()
+initial = st.session_state[scenario_key]
 
+st.subheader("1. Casing geometry and shoe track")
+st.caption("All depths are measured depth (MD) in feet. Shoe MD is the bottom of the new casing string. The top MD is derived from saved tally length.")
+st.subheader("2. Annular sections — depth intervals")
+st.caption("Add each previous casing / open-hole interval by its start and end MD. Set Outer ID to the previous casing ID or open-hole diameter. Open-hole excess applies only to Open hole rows.")
 st.subheader("3. Pump specifications")
-method = st.radio("Displacement input", ["Enter gal/stroke", "Calculate triplex pump output"],
-                  horizontal=True)
-if method == "Enter gal/stroke":
-    gal_stroke = st.number_input("Pump output (gal/stroke)", min_value=0.0, value=0.0, step=0.01, format="%.3f")
-else:
-    p1, p2, p3 = st.columns(3)
-    liner = p1.number_input("Liner diameter (in)", min_value=0.0, value=6.0, step=0.25)
-    stroke = p2.number_input("Stroke length (in)", min_value=0.0, value=12.0, step=0.5)
-    efficiency_pct = p3.number_input("Volumetric efficiency (%)", min_value=0.1, max_value=100.0, value=95.0, step=1.0)
-    gal_stroke = triplex_gal_per_stroke(liner, stroke, efficiency_pct / 100)
-    st.caption(f"Calculated single-acting triplex displacement: {gal_stroke:.3f} gal/stroke")
+st.caption("The pump can be entered directly in gal/stroke or calculated from a single-acting triplex pump. All edits are applied together when you click Save & Run.")
 
-if st.button("Calculate cementing volumes", type="primary"):
+with st.form(f"cement_form_{well_id}_{tally_id}", clear_on_submit=False):
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        shoe_md = st.number_input(
+            "New casing shoe MD (ft)", min_value=0.0, value=float(initial["shoe_md"]),
+            step=50.0, format="%.2f")
+    with c2:
+        shoe_track_ft = st.number_input(
+            "Shoe track length (ft)", min_value=0.0, max_value=float(casing_length),
+            value=min(float(initial["shoe_length"]), float(casing_length)), step=5.0, format="%.2f")
+    with c3:
+        orientation = st.selectbox(
+            "Shoe / bottom position in tally", ["Last row", "First row"],
+            index=0 if initial["bottom_last"] else 1,
+        )
+    st.caption(f"Casing top MD = shoe MD − {casing_length:,.2f} ft (included joint lengths).")
+
+    editor = st.data_editor(
+        pd.DataFrame(initial["segments"]),
+        num_rows="dynamic", hide_index=True, use_container_width=True,
+        key=f"cement_editor_{well_id}_{tally_id}",
+        column_config={
+            "Section": st.column_config.TextColumn("Section / Description", required=True),
+            "Type": st.column_config.SelectboxColumn(
+                "Type", options=["Open hole", "Cased hole"], required=True),
+            "Start MD (ft)": st.column_config.NumberColumn(
+                "Start MD (ft)", min_value=0.0, format="%.2f", required=True),
+            "End MD (ft)": st.column_config.NumberColumn(
+                "End MD (ft)", min_value=0.0, format="%.2f", required=True),
+            "Outer ID (in)": st.column_config.NumberColumn(
+                "Hole diameter / previous casing ID (in)", min_value=0.0, format="%.3f", required=True),
+            "Casing OD (in)": st.column_config.NumberColumn(
+                "New casing OD (in)", min_value=0.0, format="%.3f", required=True),
+            "Excess (%)": st.column_config.NumberColumn(
+                "OH excess (%)", min_value=0.0, format="%.1f", required=True),
+        },
+    )
+    method = st.selectbox(
+        "Pump input method", ["Manual gal/stroke", "Single-acting triplex"],
+        index=0 if initial["method"] == "Manual gal/stroke" else 1)
+    p1, p2, p3, p4 = st.columns(4)
+    with p1:
+        direct = st.number_input("Pump output (gal/stroke)", min_value=0.0,
+                                 value=float(initial["gal_stroke"]), format="%.3f", step=0.01)
+    with p2:
+        liner = st.number_input("Triplex liner diameter (in)", min_value=0.0,
+                                value=float(initial["liner"]), step=0.25)
+    with p3:
+        stroke = st.number_input("Triplex stroke length (in)", min_value=0.0,
+                                 value=float(initial["stroke"]), step=0.5)
+    with p4:
+        efficiency = st.number_input("Volumetric efficiency (%)", min_value=0.1,
+                                     max_value=100.0, value=float(initial["efficiency"]), step=1.0)
+    submit = st.form_submit_button("Save & Run Cementing Volumes", type="primary", use_container_width=True)
+
+if submit:
     try:
-        inside = split_casing_capacity(included, shoe_length,
-            bottom_last=bottom_last == "Shoe / bottom is last row")
-        if segments_input.empty:
+        if not math.isfinite(shoe_md) or shoe_md < casing_length - 0.001:
+            raise ValueError("Shoe MD cannot be shallower than the total casing string length.")
+        casing_top = shoe_md - casing_length
+        if editor.empty:
             raise ValueError("Add at least one annular section.")
-        if segments_input.isna().any().any():
-            raise ValueError("Fill in all annular section cells, including excess percentage.")
-        if not math.isfinite(float(gal_stroke)) or gal_stroke <= 0:
-            raise ValueError("Pump displacement must be greater than zero.")
-        calculated = segment_volumes(segments_input.to_dict("records"))
-        if sum(v["Length (ft)"] for v in calculated) > string_length + 0.01:
-            raise ValueError("Total annular section lengths exceed the included casing string length.")
-        st.session_state["cement_result"] = {
-            "well_id": well_id, "tally_id": selected_tally_id,
-            "inside": inside, "segments": calculated, "gal_stroke": gal_stroke,
+        if editor.isna().any().any():
+            raise ValueError("Fill all cells in every annular section.")
+        records = editor.to_dict("records")
+        calculated = segment_volumes(records)
+        gaps = check_intervals(calculated, casing_top, shoe_md)
+        inside = split_casing_capacity(included, shoe_track_ft,
+                                       bottom_last=orientation == "Last row")
+        pump_gal = (float(direct) if method == "Manual gal/stroke"
+                    else triplex_gal_per_stroke(float(liner), float(stroke), float(efficiency) / 100))
+        if not math.isfinite(pump_gal) or pump_gal <= 0:
+            raise ValueError("Provide a pump displacement greater than zero.")
+        payload = {
+            "shoe_md": shoe_md, "shoe_length": shoe_track_ft,
+            "bottom_last": orientation == "Last row", "method": method,
+            "gal_stroke": direct, "liner": liner, "stroke": stroke,
+            "efficiency": efficiency, "segments": records,
         }
-    except (ValueError, TypeError, KeyError) as err:
-        st.session_state.pop("cement_result", None)
-        st.error(f"Please correct the input: {err}")
+        # Save project worksheet only after validation succeeds.
+        save_cement_scenario(well_id, tally_id, payload)
+        st.session_state[scenario_key] = payload
+        st.session_state[f"cement_result_{well_id}_{tally_id}"] = {
+            "inside": inside, "segments": calculated, "gaps": gaps,
+            "shoe_md": shoe_md, "casing_top": casing_top, "pump_gal": pump_gal,
+            "shoe_track_ft": shoe_track_ft,
+        }
+        st.success("Worksheet saved to this well and volumes calculated.")
+    except (ValueError, TypeError, KeyError, OverflowError) as error:
+        st.error(f"Please review your inputs: {error}")
 
-report = st.session_state.get("cement_result")
-if report and report["well_id"] == well_id and report["tally_id"] == selected_tally_id:
-    internal = report["inside"]
-    sections = pd.DataFrame(report["segments"])
-    annular = sections["Adjusted (bbl)"].sum()
-    shoe = internal["shoe_bbl"]
-    above = internal["above_bbl"]
-    gal_per_stroke = report["gal_stroke"]
-    st.subheader("Calculated capacity summary")
+result = st.session_state.get(f"cement_result_{well_id}_{tally_id}")
+if result:
+    segments = result["segments"]
+    inside = result["inside"]
+    annular = sum(float(x["Adjusted (bbl)"]) for x in segments)
+    st.divider()
+    st.subheader("Calculated volumes")
     a, b, c, d = st.columns(4)
-    a.metric("Shoe track", f"{shoe:,.2f} bbl")
-    b.metric("Casing ID above shoe", f"{above:,.2f} bbl")
-    c.metric("Annulus incl. OH excess", f"{annular:,.2f} bbl")
-    d.metric("Total internal", f"{internal['internal_bbl']:,.2f} bbl")
-    st.dataframe(sections, hide_index=True, use_container_width=True)
+    a.metric("Shoe track", f'{inside["shoe_bbl"]:,.2f} bbl')
+    b.metric("Inside casing above shoe", f'{inside["above_bbl"]:,.2f} bbl')
+    c.metric("Annulus incl. excess", f'{annular:,.2f} bbl')
+    d.metric("Pump displacement", f'{result["pump_gal"]:,.3f} gal/stroke')
+    st.dataframe(pd.DataFrame(segments), hide_index=True, use_container_width=True)
     summary = pd.DataFrame([
-        {"Volume": "Shoe track", "Barrels": shoe},
-        {"Volume": "Inner casing above shoe track", "Barrels": above},
-        {"Volume": "Total casing internal", "Barrels": internal["internal_bbl"]},
-        {"Volume": "Annulus, adjusted for open-hole excess", "Barrels": annular},
-        {"Volume": "Internal + annulus (geometric sum)", "Barrels": internal["internal_bbl"] + annular},
+        {"Volume": "Shoe track", "Barrels": inside["shoe_bbl"]},
+        {"Volume": "Casing ID above shoe track", "Barrels": inside["above_bbl"]},
+        {"Volume": "Total casing internal", "Barrels": inside["internal_bbl"]},
+        {"Volume": "Total annulus, including OH excess", "Barrels": annular},
+        {"Volume": "Sum of casing interior and annulus (not pumping schedule)",
+         "Barrels": inside["internal_bbl"] + annular},
     ])
     summary["Gallons"] = summary["Barrels"] * 42
-    summary["Pump strokes"] = summary["Gallons"] / gal_per_stroke
-    st.dataframe(summary.style.format({"Barrels":"{:,.3f}", "Gallons":"{:,.1f}", "Pump strokes":"{:,.1f}"}),
-                 hide_index=True, use_container_width=True)
-    st.download_button("Download cementing calculations CSV",
-        summary.to_csv(index=False).encode("utf-8"), file_name="cementing_volumes.csv", mime="text/csv")
-    st.warning("Engineering check: these are theoretical capacities and corresponding pump strokes, NOT a verified cement job design or pumping sequence. Cement slurry yields, slurry mix volumes, displacement targets, spacers, float equipment, losses, washouts, compressibility, and actual pump calibration require separate review.")
+    summary["Strokes (theoretical)"] = summary["Gallons"] / result["pump_gal"]
+    st.dataframe(summary.style.format({
+        "Barrels": "{:,.3f}", "Gallons": "{:,.1f}",
+        "Strokes (theoretical)": "{:,.1f}"}), use_container_width=True, hide_index=True)
+    if result["gaps"]:
+        gaps_text = ", ".join(f'{a:,.2f}–{b:,.2f} ft' for a,b in result["gaps"])
+        st.warning(f"Unmodeled annular interval(s): {gaps_text}. These depths are omitted from annular volume totals.")
+
+    st.subheader("Wellbore schematic")
+    st.caption("Schematic based on submitted depths and diameters, not to engineering scale. Depth increases downward; previous casing and open hole are distinguished by color.")
+    fig = go.Figure()
+    max_diam = max(float(x["Outer ID (in)"]) for x in segments)
+    new_od = float(unique_od[0])
+    new_id = float(included[0]["ID"])
+    # Sections provide surrounding bore geometry, colored by open/cased hole.
+    for section in segments:
+        top = float(section["Start MD (ft)"])
+        bottom = float(section["End MD (ft)"])
+        radius = float(section["Outer ID (in)"]) / 2
+        kind = section["Type"]
+        color = "#C7D6E7" if kind == "Cased hole" else "#EAD7BC"
+        fig.add_shape(type="rect", x0=-radius, x1=radius,
+                      y0=top, y1=bottom, line=dict(color="#7B8A99", width=1.2),
+                      fillcolor=color, layer="below")
+        fig.add_annotation(x=radius + max_diam*.10, y=(top+bottom)/2,
+                           text=f'{section["Section"]} · {kind}<br>{top:,.0f}–{bottom:,.0f} ft',
+                           showarrow=False, xanchor="left", align="left", font=dict(size=10))
+        fig.add_annotation(x=-radius-max_diam*.08, y=(top+bottom)/2,
+                           text=f'{float(section["Outer ID (in)"]):g}"',
+                           showarrow=False, xanchor="right", font=dict(size=10))
+    # New casing walls and interior. Uniform diameter for illustration only.
+    top = result["casing_top"]
+    bottom = result["shoe_md"]
+    for lo,hi in [(-new_od/2,-new_id/2),(new_id/2,new_od/2)]:
+        fig.add_shape(type="rect",x0=lo,x1=hi,y0=top,y1=bottom,
+                      fillcolor="#244C70",line=dict(width=0))
+    fig.add_shape(type="rect", x0=-new_id/2, x1=new_id/2, y0=top,
+                  y1=bottom, fillcolor="#FFFFFF", line=dict(width=0),layer="below")
+    shoe_top = bottom - result["shoe_track_ft"]
+    fig.add_shape(type="rect", x0=-new_id/2, x1=new_id/2,
+                  y0=shoe_top, y1=bottom, fillcolor="#9AD1C2",
+                  opacity=0.8,line=dict(width=0))
+    fig.add_shape(type="line",x0=-new_od/2,x1=new_od/2,y0=bottom,y1=bottom,
+                  line=dict(color="#12334F",width=4))
+    fig.add_annotation(x=0,y=bottom,text="Shoe",showarrow=True,ay=28,font=dict(size=10))
+    fig.update_layout(height=580,margin=dict(t=12,b=28,l=58,r=185),
+        xaxis=dict(title="Illustrative diameter (in)",range=[-max_diam*.75,max_diam*1.0],
+                   zeroline=False,showgrid=False),
+        yaxis=dict(title="Measured depth (ft)",autorange="reversed",showgrid=True),
+        plot_bgcolor="white",paper_bgcolor="white",showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+    st.download_button("Download calculations CSV",
+        data=summary.to_csv(index=False).encode("utf-8"),
+        file_name="cementing_volumes.csv", mime="text/csv")
+    st.warning("Preliminary theoretical capacities and strokes only. This is not a verified cement-job pumping schedule. Check volumes, depth references, pipe dimensions, excess factors, slurry yields, plug/spacer displacement, float equipment, pump calibration and operational constraints before field use.")
