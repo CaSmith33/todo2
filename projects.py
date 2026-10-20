@@ -65,4 +65,4 @@ st.divider()
 st.subheader("Project data backup")
 st.download_button("Download company & well backup (JSON)", data=export_json(),
                    file_name="toolbox_projects_backup.json", mime="application/json")
-st.caption("This backup includes company/well metadata only; FIT/Tally calculations aren't persisted to projects yet.")
+st.caption("Backup includes companies, wells and saved casing tallies. Import/restore is not yet implemented; keep this JSON file safe.")
