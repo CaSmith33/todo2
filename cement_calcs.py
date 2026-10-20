@@ -63,8 +63,13 @@ def segment_volumes(segments):
         if excess < 0:
             raise ValueError("Excess percent must not be negative.")
         nominal = annular_bbl(length, bore, casing)
-        result.append({**section, "Length (ft)": length, "Nominal (bbl)": nominal,
-                       "Adjusted (bbl)": nominal * (1 + excess / 100)})
+        result.append({
+            **section,
+            "Length (ft)": length,
+            "Nominal capacity (bbl/ft)": nominal / length,
+            "Nominal (bbl)": nominal,
+            "Adjusted (bbl)": nominal * (1 + excess / 100),
+        })
     return result
 
 def check_intervals(segments, casing_top_md, shoe_md):
